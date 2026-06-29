@@ -1,0 +1,67 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload release
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.next' \
+            --exclude='dist' \
+            --exclude='coverage' \
+            -czf release.tar.gz .
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "mkdir -p '${{ secrets.DEPLOY_PATH }}'"
+          scp -i ~/.ssh/deploy_key release.tar.gz "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/release.tar.gz"
+
+      - name: Deploy with Docker Compose
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
+          set -euo pipefail
+          cd "${{ secrets.DEPLOY_PATH }}"
+          tar -xzf release.tar.gz
+          cat > .env.production << ENV
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          DATABASE_URL=postgres://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}
+          REDIS_URL=redis://redis:6379
+          KAFKA_BROKERS=kafka:29092
+          JWT_ACCESS_SECRET=${{ secrets.JWT_ACCESS_SECRET }}
+          JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET }}
+          JWT_ACCESS_TTL=15m
+          JWT_REFRESH_TTL_DAYS=30
+          APP_ORIGIN=${{ vars.PUBLIC_APP_URL }}
+          NEXT_PUBLIC_API_URL=${{ vars.PUBLIC_API_URL }}
+          NEXT_PUBLIC_SOCKET_URL=${{ vars.PUBLIC_API_URL }}
+          GRAFANA_ADMIN_USER=${{ secrets.GRAFANA_ADMIN_USER }}
+          GRAFANA_ADMIN_PASSWORD=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          ENV
+          docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+          EOF
+
+      - name: Deployment URL
+        run: |
+          echo "### Deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Application: ${{ vars.PUBLIC_APP_URL }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "API: ${{ vars.PUBLIC_API_URL }}" >> "$GITHUB_STEP_SUMMARY"
